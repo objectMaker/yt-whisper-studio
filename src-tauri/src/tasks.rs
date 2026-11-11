@@ -571,33 +571,59 @@ async fn do_download(app: &AppHandle, task_id: &str, url: &str, opts: &DownloadO
     }
     args.push(url.to_string());
 
-    let mut last_emit = 0f64;
-    let mut recent: Vec<String> = Vec::new();
-    let code = run_process(app, task_id, &ytdlp, &args, |line| {
-        if let Some((pct, speed, eta)) = parse_download_line(line) {
-            if pct - last_emit >= 0.5 || pct >= 100.0 {
-                last_emit = pct;
-                patch(app, task_id, |t| {
-                    t.progress = (pct * 0.7).min(70.0);
-                    t.speed = speed.clone();
-                    t.eta = eta.clone();
-                    t.message = format!("下载中 {pct:.1}%");
-                });
+    // yt-dlp 的 HttpFD 只重试 TransportError / HTTP 5xx 等错误；下载中途
+    // 套接字抛出的 OSError（如 [Errno 22] Invalid argument）会直接导致
+    // 整个下载失败（退出码 120）。这类错误大多是网络/代理的瞬间中断，
+    // 而 yt-dlp 支持断点续传（.part 文件），所以在应用层重试几次，
+    // 每次失败后等待几秒再继续，未完成的部分会接着下，不会从头重下。
+    const MAX_ATTEMPTS: usize = 3;
+    let mut code = -1;
+    let mut tail = String::new();
+    let mut attempt = 0;
+    while attempt < MAX_ATTEMPTS {
+        attempt += 1;
+        let mut last_emit = 0f64;
+        let mut recent: Vec<String> = Vec::new();
+        // Python 解释器退出时往已关闭的 stdout 刷缓存会打印一行无害的
+        // "Exception ignored while flushing sys.stdout"（及随后的一行
+        // OSError），它不是下载失败的原因，不收入任务日志，免得误导用户。
+        let mut skip_flush_noise = false;
+        code = run_process(app, task_id, &ytdlp, &args, |line| {
+            if let Some((pct, speed, eta)) = parse_download_line(line) {
+                if pct - last_emit >= 0.5 || pct >= 100.0 {
+                    last_emit = pct;
+                    patch(app, task_id, |t| {
+                        t.progress = (pct * 0.7).min(70.0);
+                        t.speed = speed.clone();
+                        t.eta = eta.clone();
+                        t.message = format!("下载中 {pct:.1}%");
+                    });
+                }
+            } else {
+                if line.starts_with("Exception ignored while flushing sys.stdout") {
+                    skip_flush_noise = true;
+                    return;
+                }
+                if skip_flush_noise {
+                    skip_flush_noise = false;
+                    if line.trim_start().starts_with("OSError:") {
+                        return;
+                    }
+                }
+                patch(app, task_id, |t| push_log(t, line));
+                recent.push(line.to_string());
+                if recent.len() > 40 {
+                    recent.remove(0);
+                }
             }
-        } else {
-            patch(app, task_id, |t| push_log(t, line));
-            recent.push(line.to_string());
-            if recent.len() > 40 {
-                recent.remove(0);
-            }
+        })
+        .await?;
+        if is_canceled(app, task_id) {
+            return Ok(());
         }
-    })
-    .await?;
-    if is_canceled(app, task_id) {
-        return Ok(());
-    }
-
-    if code != 0 {
+        if code == 0 {
+            break;
+        }
         let errors: Vec<String> = recent
             .iter()
             .filter(|l| l.to_ascii_lowercase().contains("error"))
@@ -608,15 +634,34 @@ async fn do_download(app: &AppHandle, task_id: &str, url: &str, opts: &DownloadO
         } else {
             errors.iter().rev().take(2).cloned().collect()
         };
-        let tail = picked
-            .into_iter()
-            .rev()
-            .collect::<Vec<_>>()
-            .join(" | ");
-        if tail.is_empty() {
-            return Err(format!("yt-dlp 退出码 {code}，请检查链接/网络/登录态"));
+        tail = picked.into_iter().rev().collect::<Vec<_>>().join(" | ");
+        if attempt < MAX_ATTEMPTS {
+            let wait_secs = if attempt == 1 { 5 } else { 15 };
+            patch(app, task_id, |t| {
+                t.message = format!("下载中断（退出码 {code}），{wait_secs} 秒后重试（第 {attempt}/{MAX_ATTEMPTS} 次）…");
+                push_log(
+                    t,
+                    &format!("下载中断，{wait_secs} 秒后自动重试（第 {attempt}/{MAX_ATTEMPTS} 次），已下载的部分会断点续传"),
+                );
+            });
+            tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
+            if is_canceled(app, task_id) {
+                return Ok(());
+            }
         }
-        return Err(format!("yt-dlp 退出码 {code}：{tail}"));
+    }
+
+    if code != 0 {
+        if tail.is_empty() {
+            return Err(format!(
+                "yt-dlp 退出码 {code}（已重试 {MAX_ATTEMPTS} 次），请检查链接/网络/登录态；输出目录：{}",
+                out_dir.display()
+            ));
+        }
+        return Err(format!(
+            "yt-dlp 退出码 {code}：{tail}（已重试 {MAX_ATTEMPTS} 次；输出目录：{}；可能是网络临时中断，可稍后重试或检查代理）",
+            out_dir.display()
+        ));
     }
 
     let raw_path = std::fs::read_to_string(&path_file)
