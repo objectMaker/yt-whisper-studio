@@ -64,6 +64,8 @@ pub struct Task {
     pub audio_seconds: Option<f64>,
     /// 字幕转录耗时（秒）
     pub transcribe_seconds: Option<f64>,
+    /// 成品文件大小（字节）
+    pub file_size: Option<u64>,
     pub log: Vec<String>,
 }
 
@@ -88,6 +90,7 @@ impl Task {
             download_seconds: None,
             audio_seconds: None,
             transcribe_seconds: None,
+            file_size: None,
             log: Vec::new(),
         }
     }
@@ -739,9 +742,11 @@ async fn do_download(app: &AppHandle, task_id: &str, url: &str, opts: &DownloadO
         .and_then(|s| s.to_str())
         .unwrap_or("video")
         .to_string();
+    let file_size = std::fs::metadata(&file).ok().map(|m| m.len());
     patch(app, task_id, |t| {
         t.file_path = Some(file.to_string_lossy().to_string());
         t.title = stem.clone();
+        t.file_size = file_size;
         t.progress = 72.0;
         t.message = "视频下载完成".into();
         t.speed.clear();
@@ -892,6 +897,7 @@ pub fn start_transcribe(app: AppHandle, paths: Vec<String>, opts: TranscribeOpti
             .unwrap_or("media")
             .to_string();
         task.file_path = Some(path.to_string_lossy().to_string());
+        task.file_size = std::fs::metadata(&path).ok().map(|m| m.len());
         let snapshot = task.clone();
         {
             let state = app.state::<AppState>();

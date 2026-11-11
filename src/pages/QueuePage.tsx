@@ -13,7 +13,7 @@ import {
 import { api, type Settings, type Task } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { cn } from "@/lib/utils";
+import { cn, formatBytes } from "@/lib/utils";
 import { isActive, stageMeta } from "@/lib/stage";
 
 function dirOf(p: string) {
@@ -125,13 +125,17 @@ export default function QueuePage({
                       {(task.downloadStartedAt ||
                         task.downloadSeconds != null ||
                         task.audioSeconds != null ||
-                        task.transcribeSeconds != null) && (
+                        task.transcribeSeconds != null ||
+                        task.fileSize != null) && (
                         <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted-foreground/80">
                           {task.downloadStartedAt && (
                             <span className="flex items-center gap-1">
                               <Clock className="size-3" />
                               开始 {fmtTime(task.downloadStartedAt)}
                             </span>
+                          )}
+                          {task.fileSize != null && (
+                            <span>大小 {formatBytes(task.fileSize)}</span>
                           )}
                           {task.downloadSeconds != null && (
                             <span>下载耗时 {fmtDuration(task.downloadSeconds)}</span>

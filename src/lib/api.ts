@@ -33,6 +33,7 @@ export interface Task {
   downloadSeconds: number | null;
   audioSeconds: number | null;
   transcribeSeconds: number | null;
+  fileSize: number | null;
   log: string[];
 }
 
@@ -226,6 +227,7 @@ const mockTasks: Task[] = [
     downloadSeconds: 36.4,
     audioSeconds: 2.1,
     transcribeSeconds: 18.7,
+    fileSize: 150904086,
     log: ["已复用内置浏览器 YouTube 会话 Cookie", "[youtube] dQw4w9WgXcQ: Downloading webpage"],
   },
 ];
