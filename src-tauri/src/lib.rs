@@ -83,6 +83,12 @@ fn cancel_task(app: tauri::AppHandle, id: String) {
 fn remove_task(app: tauri::AppHandle, state: tauri::State<AppState>, id: String) {
     state.tasks.lock().unwrap().remove(&id);
     let _ = app.emit("task-removed", id);
+    tasks::save_tasks(&app);
+}
+
+#[tauri::command]
+fn retry_task(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    tasks::retry(&app, &id)
 }
 
 #[tauri::command]
@@ -130,6 +136,21 @@ pub fn run() {
         .setup(|app| {
             let settings = settings::load(app.handle());
             app.manage(AppState::new(settings));
+            tasks::restore_tasks(app.handle());
+            // 任务列表每 2 秒按需落盘，避免进度事件频繁写文件
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    if handle
+                        .state::<AppState>()
+                        .tasks_dirty
+                        .swap(false, std::sync::atomic::Ordering::Relaxed)
+                    {
+                        tasks::save_tasks(&handle);
+                    }
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -144,6 +165,7 @@ pub fn run() {
             list_tasks,
             cancel_task,
             remove_task,
+            retry_task,
             start_download,
             start_transcribe,
             scan_folder,
@@ -159,6 +181,11 @@ pub fn run() {
             browser::browser_url,
             browser::extract_youtube_cookies,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                tasks::save_tasks(app);
+            }
+        });
 }

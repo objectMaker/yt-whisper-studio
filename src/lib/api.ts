@@ -12,6 +12,7 @@ export type TaskStage =
   | "transcribing"
   | "done"
   | "error"
+  | "paused"
   | "canceled";
 
 export interface Task {
@@ -34,6 +35,8 @@ export interface Task {
   audioSeconds: number | null;
   transcribeSeconds: number | null;
   fileSize: number | null;
+  extractMp3: boolean;
+  transcribe: boolean;
   log: string[];
 }
 
@@ -228,6 +231,8 @@ const mockTasks: Task[] = [
     audioSeconds: 2.1,
     transcribeSeconds: 18.7,
     fileSize: 150904086,
+    extractMp3: true,
+    transcribe: true,
     log: ["已复用内置浏览器 YouTube 会话 Cookie", "[youtube] dQw4w9WgXcQ: Downloading webpage"],
   },
 ];
@@ -293,6 +298,7 @@ export const api = {
   deleteModel: (id: string) => call<ToolchainStatus>("delete_model", { id }),
   listTasks: () => call<Task[]>("list_tasks"),
   cancelTask: (id: string) => call<void>("cancel_task", { id }),
+  retryTask: (id: string) => call<void>("retry_task", { id }),
   removeTask: (id: string) => call<void>("remove_task", { id }),
   startDownload: (url: string, options: { extractMp3?: boolean; transcribe?: boolean }) =>
     call<Task>("start_download", { url, options }),

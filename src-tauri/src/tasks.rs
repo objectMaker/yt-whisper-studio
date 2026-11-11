@@ -25,6 +25,8 @@ pub struct AppState {
     pub browser_lock: Mutex<()>,
     /// 被用户暂停的资源下载（键为 kind:id）
     pub canceled_assets: Mutex<HashSet<String>>,
+    /// 任务列表有变更，等待落盘
+    pub tasks_dirty: std::sync::atomic::AtomicBool,
 }
 
 impl AppState {
@@ -35,11 +37,12 @@ impl AppState {
             pids: Mutex::new(HashMap::new()),
             browser_lock: Mutex::new(()),
             canceled_assets: Mutex::new(HashSet::new()),
+            tasks_dirty: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Task {
     pub id: String,
@@ -66,6 +69,11 @@ pub struct Task {
     pub transcribe_seconds: Option<f64>,
     /// 成品文件大小（字节）
     pub file_size: Option<u64>,
+    /// 下载任务创建时选定的处理选项，供重试/继续时复用
+    #[serde(default)]
+    pub extract_mp3: bool,
+    #[serde(default)]
+    pub transcribe: bool,
     pub log: Vec<String>,
 }
 
@@ -91,6 +99,8 @@ impl Task {
             audio_seconds: None,
             transcribe_seconds: None,
             file_size: None,
+            extract_mp3: false,
+            transcribe: false,
             log: Vec::new(),
         }
     }
@@ -138,6 +148,9 @@ pub fn patch<F: FnOnce(&mut Task)>(app: &AppHandle, id: &str, f: F) {
         }
     };
     if let Some(t) = snapshot {
+        state
+            .tasks_dirty
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         let _ = app.emit("task-updated", t);
     }
 }
@@ -157,13 +170,28 @@ fn push_log(task: &mut Task, line: &str) {
 fn is_canceled(app: &AppHandle, id: &str) -> bool {
     let state = app.state::<AppState>();
     let map = state.tasks.lock().unwrap();
-    map.get(id).map(|t| t.stage == "canceled").unwrap_or(false)
+    map.get(id)
+        .map(|t| t.stage == "canceled" || t.stage == "paused")
+        .unwrap_or(false)
 }
 
 pub fn cancel(app: &AppHandle, id: &str) {
+    // 下载任务用「暂停」语义：保留 .part，稍后可继续；转录任务没有断点，直接取消。
+    let is_download = {
+        let state = app.state::<AppState>();
+        let map = state.tasks.lock().unwrap();
+        map.get(id).map(|t| t.kind == "download").unwrap_or(false)
+    };
     patch(app, id, |t| {
-        t.stage = "canceled".into();
-        t.message = "正在取消…".into();
+        t.speed.clear();
+        t.eta.clear();
+        if is_download {
+            t.stage = "paused".into();
+            t.message = "已暂停，可点击继续".into();
+        } else {
+            t.stage = "canceled".into();
+            t.message = "正在取消…".into();
+        }
     });
     let state = app.state::<AppState>();
     let pid = state.pids.lock().unwrap().get(id).copied();
@@ -174,6 +202,140 @@ pub fn cancel(app: &AppHandle, id: &str) {
         cmd.creation_flags(CREATE_NO_WINDOW);
         let _ = cmd.output();
     }
+}
+
+fn tasks_file(app: &AppHandle) -> PathBuf {
+    crate::tools::app_data_dir(app).join("tasks.json")
+}
+
+/// 把当前任务列表落盘，供下次启动恢复。
+pub fn save_tasks(app: &AppHandle) {
+    let list = {
+        let state = app.state::<AppState>();
+        let map = state.tasks.lock().unwrap();
+        let mut list: Vec<Task> = map.values().cloned().collect();
+        list.sort_by_key(|t| t.created_at);
+        list
+    };
+    let Ok(text) = serde_json::to_string(&list) else {
+        return;
+    };
+    let path = tasks_file(app);
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, text).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+}
+
+/// 启动时恢复历史任务。上次未完成的任务标记为可继续/可重试，而不是一直转圈。
+pub fn restore_tasks(app: &AppHandle) {
+    let Ok(text) = std::fs::read_to_string(tasks_file(app)) else {
+        return;
+    };
+    let Ok(list) = serde_json::from_str::<Vec<Task>>(&text) else {
+        return;
+    };
+    let state = app.state::<AppState>();
+    let mut map = state.tasks.lock().unwrap();
+    for mut t in list {
+        let was_active = matches!(
+            t.stage.as_str(),
+            "queued" | "preparing" | "downloading" | "extracting" | "transcribing"
+        );
+        if was_active {
+            if t.kind == "download" {
+                t.stage = "paused".into();
+                t.message = "上次未完成，可点击继续".into();
+            } else {
+                t.stage = "error".into();
+                t.message = "上次未完成，可点击重试".into();
+            }
+            t.speed.clear();
+            t.eta.clear();
+        }
+        map.insert(t.id.clone(), t);
+    }
+}
+
+fn reset_for_retry(app: &AppHandle, id: &str) {
+    patch(app, id, |t| {
+        t.stage = "queued".into();
+        t.progress = 0.0;
+        t.speed.clear();
+        t.eta.clear();
+        t.error = None;
+        t.srt_path = None;
+        t.download_started_at = None;
+        t.download_seconds = None;
+        t.audio_seconds = None;
+        t.transcribe_seconds = None;
+        t.message = "准备重新开始…".into();
+        push_log(t, "— 重新开始 —");
+    });
+}
+
+/// 失败/暂停后的「继续」：下载走 yt-dlp 断点续传，转录重新执行。
+pub fn retry(app: &AppHandle, id: &str) -> Result<(), String> {
+    let task = {
+        let state = app.state::<AppState>();
+        let map = state.tasks.lock().unwrap();
+        map.get(id).cloned()
+    }
+    .ok_or_else(|| "任务不存在".to_string())?;
+    if matches!(
+        task.stage.as_str(),
+        "queued" | "preparing" | "downloading" | "extracting" | "transcribing"
+    ) {
+        return Err("任务正在进行中".into());
+    }
+    let app2 = app.clone();
+    let id2 = id.to_string();
+    if task.kind == "download" {
+        let url = task.url.clone().ok_or_else(|| "任务缺少链接".to_string())?;
+        let opts = DownloadOptions {
+            extract_mp3: Some(task.extract_mp3),
+            transcribe: Some(task.transcribe),
+        };
+        reset_for_retry(app, id);
+        tauri::async_runtime::spawn(async move {
+            if let Err(e) = do_download(&app2, &id2, &url, &opts).await {
+                if !is_canceled(&app2, &id2) {
+                    patch(&app2, &id2, |t| {
+                        t.stage = "error".into();
+                        t.error = Some(e.clone());
+                        t.message = e;
+                    });
+                }
+            }
+        });
+    } else {
+        let path = task
+            .file_path
+            .clone()
+            .ok_or_else(|| "任务缺少源文件".to_string())?;
+        let opts = TranscribeOptions {
+            model: task.model.clone(),
+            language: None,
+        };
+        reset_for_retry(app, id);
+        tauri::async_runtime::spawn(async move {
+            if let Err(e) = do_transcribe(&app2, &id2, Path::new(&path), &opts).await {
+                if is_canceled(&app2, &id2) {
+                    patch(&app2, &id2, |t| {
+                        t.stage = "canceled".into();
+                        t.message = "已取消".into();
+                    });
+                } else {
+                    patch(&app2, &id2, |t| {
+                        t.stage = "error".into();
+                        t.error = Some(e.clone());
+                        t.message = e;
+                    });
+                }
+            }
+        });
+    }
+    Ok(())
 }
 
 fn spawn_reader<R: AsyncRead + Unpin + Send + 'static>(reader: R, tx: UnboundedSender<String>) {
@@ -509,18 +671,27 @@ pub fn start_download(app: AppHandle, url: String, opts: DownloadOptions) -> Res
     let mut task = Task::new(id.clone(), "download");
     task.url = Some(url.clone());
     task.title = url.clone();
+    {
+        let state = app.state::<AppState>();
+        let settings = state.settings.lock().unwrap().clone();
+        task.extract_mp3 = opts.extract_mp3.unwrap_or(settings.extract_mp3);
+        task.transcribe = opts.transcribe.unwrap_or(settings.transcribe);
+    }
     let snapshot = task.clone();
     {
         let state = app.state::<AppState>();
         state.tasks.lock().unwrap().insert(id.clone(), task);
     }
     let _ = app.emit("task-updated", snapshot.clone());
+    save_tasks(&app);
     tauri::async_runtime::spawn(async move {
         if let Err(e) = do_download(&app, &id, &url, &opts).await {
             if is_canceled(&app, &id) {
                 patch(&app, &id, |t| {
-                    t.stage = "canceled".into();
-                    t.message = "已取消".into();
+                    if t.stage != "paused" {
+                        t.stage = "canceled".into();
+                        t.message = "已取消".into();
+                    }
                 });
             } else {
                 patch(&app, &id, |t| {
@@ -535,6 +706,9 @@ pub fn start_download(app: AppHandle, url: String, opts: DownloadOptions) -> Res
 }
 
 async fn do_download(app: &AppHandle, task_id: &str, url: &str, opts: &DownloadOptions) -> Result<(), String> {
+    if is_canceled(app, task_id) {
+        return Ok(());
+    }
     let settings = {
         let state = app.state::<AppState>();
         let s = state.settings.lock().unwrap().clone();
@@ -598,6 +772,10 @@ async fn do_download(app: &AppHandle, task_id: &str, url: &str, opts: &DownloadO
         "mp4".into(),
         "-o".into(),
         out_template.to_string_lossy().to_string(),
+        // 先写目标路径：已下载过（无移动）时也能拿到文件位置
+        "--print-to-file".into(),
+        "%(filename)s".into(),
+        path_file.to_string_lossy().to_string(),
         "--print-to-file".into(),
         "after_move:filepath".into(),
         path_file.to_string_lossy().to_string(),
@@ -924,6 +1102,7 @@ pub fn start_transcribe(app: AppHandle, paths: Vec<String>, opts: TranscribeOpti
             }
         });
     }
+    save_tasks(&app);
     Ok(created)
 }
 
@@ -933,6 +1112,9 @@ async fn do_transcribe(
     input: &Path,
     opts: &TranscribeOptions,
 ) -> Result<(), String> {
+    if is_canceled(app, task_id) {
+        return Ok(());
+    }
     let settings = {
         let state = app.state::<AppState>();
         let s = state.settings.lock().unwrap().clone();

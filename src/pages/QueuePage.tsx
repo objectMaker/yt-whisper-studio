@@ -7,6 +7,8 @@ import {
   Download,
   FolderOpen,
   ListVideo,
+  Pause,
+  Play,
   Square,
   Trash2,
 } from "lucide-react";
@@ -14,7 +16,17 @@ import { api, type Settings, type Task } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { cn, formatBytes } from "@/lib/utils";
-import { isActive, stageMeta } from "@/lib/stage";
+import { canRetry, isActive, stageMeta } from "@/lib/stage";
+
+type Filter = "all" | "active" | "done" | "transcribed" | "problem";
+
+const FILTERS: { id: Filter; label: string }[] = [
+  { id: "all", label: "全部" },
+  { id: "active", label: "进行中" },
+  { id: "done", label: "已完成" },
+  { id: "transcribed", label: "已转录" },
+  { id: "problem", label: "失败/暂停" },
+];
 
 function dirOf(p: string) {
   const idx = Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"));
@@ -44,39 +56,72 @@ export default function QueuePage({
   notify: (msg: string, kind?: "ok" | "err") => void;
 }) {
   const [expanded, setExpanded] = useState<string | null>(null);
-  const active = tasks.filter((t) => isActive(t.stage)).length;
-  const done = tasks.filter((t) => t.stage === "done").length;
+  const [filter, setFilter] = useState<Filter>("all");
+  const counts: Record<Filter, number> = {
+    all: tasks.length,
+    active: tasks.filter((t) => isActive(t.stage)).length,
+    done: tasks.filter((t) => t.stage === "done").length,
+    transcribed: tasks.filter((t) => !!t.srtPath).length,
+    problem: tasks.filter((t) => ["error", "paused", "canceled"].includes(t.stage)).length,
+  };
+  const visible = tasks.filter((t) => {
+    switch (filter) {
+      case "active":
+        return isActive(t.stage);
+      case "done":
+        return t.stage === "done";
+      case "transcribed":
+        return !!t.srtPath;
+      case "problem":
+        return ["error", "paused", "canceled"].includes(t.stage);
+      default:
+        return true;
+    }
+  });
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 items-center gap-6 border-b border-border/60 px-6 py-3 text-xs">
-        <div className="text-muted-foreground">
-          进行中 <span className="ml-1 font-semibold text-foreground">{active}</span>
-        </div>
-        <div className="text-muted-foreground">
-          已完成 <span className="ml-1 font-semibold text-emerald-400">{done}</span>
-        </div>
+      <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-border/60 px-6 py-3">
+        {FILTERS.map((f) => (
+          <button
+            key={f.id}
+            onClick={() => setFilter(f.id)}
+            className={cn(
+              "flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] transition-colors",
+              filter === f.id
+                ? "bg-primary/15 text-primary"
+                : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
+            )}
+          >
+            {f.label}
+            <span className="font-mono text-[10px] opacity-70">{counts[f.id]}</span>
+          </button>
+        ))}
         <div className="ml-auto text-[11px] text-muted-foreground/70">
           输出：{settings?.outputDir}
         </div>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
-        {tasks.length === 0 ? (
+        {visible.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
             <div className="flex size-14 items-center justify-center rounded-2xl bg-secondary/60">
               <ListVideo className="size-6 text-muted-foreground" />
             </div>
             <div>
-              <p className="text-sm font-medium">队列为空</p>
+              <p className="text-sm font-medium">
+                {tasks.length === 0 ? "队列为空" : "没有符合条件的任务"}
+              </p>
               <p className="mt-1 text-xs text-muted-foreground">
-                在「YouTube 浏览器」中打开视频，点击下载即可加入队列。
+                {tasks.length === 0
+                  ? "在「YouTube 浏览器」中打开视频，点击下载即可加入队列。"
+                  : "换个筛选条件看看，或清空筛选。"}
               </p>
             </div>
           </div>
         ) : (
           <div className="space-y-2.5">
-            {[...tasks].reverse().map((task) => {
+            {[...visible].reverse().map((task) => {
               const meta = stageMeta[task.stage];
               const isOpen = expanded === task.id;
               return (
@@ -169,10 +214,28 @@ export default function QueuePage({
                         <Button
                           variant="ghost"
                           size="icon-sm"
-                          title="取消"
+                          title={task.kind === "download" ? "暂停下载" : "取消"}
                           onClick={() => api.cancelTask(task.id)}
                         >
-                          <Square className="size-3.5 text-red-400" />
+                          {task.kind === "download" ? (
+                            <Pause className="size-3.5 text-amber-400" />
+                          ) : (
+                            <Square className="size-3.5 text-red-400" />
+                          )}
+                        </Button>
+                      )}
+                      {canRetry(task) && (
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          className="h-7 gap-1 px-2 text-[11px]"
+                          title={task.kind === "download" ? "从断点继续下载" : "重新转录"}
+                          onClick={() =>
+                            api.retryTask(task.id).catch((e) => notify(String(e), "err"))
+                          }
+                        >
+                          <Play className="size-3" />
+                          {task.kind === "download" ? "继续下载" : "重试"}
                         </Button>
                       )}
                       {task.filePath && task.stage === "done" && (
