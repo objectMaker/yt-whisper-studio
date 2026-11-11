@@ -3,6 +3,7 @@ import {
   Captions,
   ChevronDown,
   CircleX,
+  Clock,
   Download,
   FolderOpen,
   ListVideo,
@@ -18,6 +19,19 @@ import { isActive, stageMeta } from "@/lib/stage";
 function dirOf(p: string) {
   const idx = Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"));
   return idx > 0 ? p.slice(0, idx) : p;
+}
+
+function fmtTime(ms: number) {
+  return new Date(ms).toLocaleTimeString("zh-CN", { hour12: false });
+}
+
+function fmtDuration(sec: number) {
+  if (sec >= 60) {
+    const m = Math.floor(sec / 60);
+    const s = Math.round(sec % 60);
+    return `${m} 分 ${s} 秒`;
+  }
+  return `${sec >= 10 ? Math.round(sec) : sec.toFixed(1)} 秒`;
 }
 
 export default function QueuePage({
@@ -108,6 +122,28 @@ export default function QueuePage({
                           <span className="font-mono">剩余 {task.eta}</span>
                         )}
                       </div>
+                      {(task.downloadStartedAt ||
+                        task.downloadSeconds != null ||
+                        task.audioSeconds != null ||
+                        task.transcribeSeconds != null) && (
+                        <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted-foreground/80">
+                          {task.downloadStartedAt && (
+                            <span className="flex items-center gap-1">
+                              <Clock className="size-3" />
+                              开始 {fmtTime(task.downloadStartedAt)}
+                            </span>
+                          )}
+                          {task.downloadSeconds != null && (
+                            <span>下载耗时 {fmtDuration(task.downloadSeconds)}</span>
+                          )}
+                          {task.audioSeconds != null && (
+                            <span>转码耗时 {fmtDuration(task.audioSeconds)}</span>
+                          )}
+                          {task.transcribeSeconds != null && (
+                            <span>转录耗时 {fmtDuration(task.transcribeSeconds)}</span>
+                          )}
+                        </div>
+                      )}
                       {task.error && (
                         <div className="mt-2 flex items-start gap-1.5 rounded-md border border-red-500/20 bg-red-500/5 px-2.5 py-1.5 text-[11px] text-red-300">
                           <CircleX className="mt-0.5 size-3 shrink-0" />

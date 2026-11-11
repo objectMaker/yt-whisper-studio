@@ -155,6 +155,7 @@ pub fn run() {
             browser::browser_back,
             browser::browser_forward,
             browser::browser_reload,
+            browser::browser_pause,
             browser::browser_url,
             browser::extract_youtube_cookies,
         ])

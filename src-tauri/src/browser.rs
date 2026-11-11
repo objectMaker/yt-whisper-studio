@@ -114,6 +114,18 @@ pub async fn browser_reload(window: Window) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// 切换离开浏览器页时暂停正在播放的媒体，避免声音继续在后播放。
+#[tauri::command]
+pub async fn browser_pause(window: Window) -> Result<(), String> {
+    if let Some(wv) = find(&window) {
+        wv.eval(
+            "document.querySelectorAll('video,audio').forEach(function(m){try{m.pause()}catch(e){}})",
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn browser_url(window: Window) -> Result<Option<String>, String> {
     Ok(find(&window)

@@ -83,6 +83,8 @@ export default function BrowserPage({
     return () => {
       ro.disconnect();
       window.removeEventListener("resize", syncBounds);
+      // 离开本页（切换左侧栏）时暂停播放，避免后台继续出声
+      api.browserPause().catch(() => {});
       api.browserHide().catch(() => {});
     };
   }, [notify, syncBounds]);

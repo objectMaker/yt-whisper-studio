@@ -89,7 +89,6 @@ export default function App() {
       try {
         const saved = await api.saveSettings(next);
         setSettings(saved);
-        notify("设置已保存");
       } catch (e) {
         notify(String(e), "err");
       }
@@ -227,7 +226,6 @@ export default function App() {
               settings={settings}
               status={status}
               assets={assets}
-              onChangeSettings={setSettings}
               onSaveSettings={saveSettings}
               onRefreshStatus={refreshStatus}
               notify={notify}

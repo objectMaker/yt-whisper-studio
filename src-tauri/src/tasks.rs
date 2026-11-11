@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::Command;
@@ -56,6 +56,14 @@ pub struct Task {
     pub error: Option<String>,
     pub model: Option<String>,
     pub created_at: u64,
+    /// 下载开始时间（毫秒时间戳）
+    pub download_started_at: Option<u64>,
+    /// 视频下载耗时（秒）
+    pub download_seconds: Option<f64>,
+    /// 音频转码耗时（秒）
+    pub audio_seconds: Option<f64>,
+    /// 字幕转录耗时（秒）
+    pub transcribe_seconds: Option<f64>,
     pub log: Vec<String>,
 }
 
@@ -76,6 +84,10 @@ impl Task {
             error: None,
             model: None,
             created_at: now_ms(),
+            download_started_at: None,
+            download_seconds: None,
+            audio_seconds: None,
+            transcribe_seconds: None,
             log: Vec::new(),
         }
     }
@@ -163,10 +175,25 @@ pub fn cancel(app: &AppHandle, id: &str) {
 
 fn spawn_reader<R: AsyncRead + Unpin + Send + 'static>(reader: R, tx: UnboundedSender<String>) {
     tokio::spawn(async move {
-        let mut lines = BufReader::new(reader).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            if tx.send(line).is_err() {
-                break;
+        // 不能用 lines()：子进程在中文 Windows 上按 GBK 输出（out gbk），
+        // 标题里的全角字符不是合法 UTF-8，严格解码会直接结束读取、关闭管道，
+        // 导致 yt-dlp 写进度时报 [Errno 22] 并退出 120。这里按字节读、宽松解码。
+        let mut reader = BufReader::new(reader);
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            match reader.read_until(b'\n', &mut buf).await {
+                Ok(0) => break,
+                Ok(_) => {
+                    while matches!(buf.last(), Some(b'\n' | b'\r')) {
+                        buf.pop();
+                    }
+                    let line = String::from_utf8_lossy(&buf).to_string();
+                    if tx.send(line).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
             }
         }
     });
@@ -183,7 +210,10 @@ async fn run_process<F: FnMut(&str)>(
     cmd.args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        // 强制 Python 系工具（yt-dlp）用 UTF-8 输出，避免中文 Windows 下回落到 GBK
+        .env("PYTHONIOENCODING", "utf-8")
+        .env("PYTHONUTF8", "1");
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
     let mut child = cmd
@@ -515,7 +545,13 @@ async fn do_download(app: &AppHandle, task_id: &str, url: &str, opts: &DownloadO
 
     let out_dir = PathBuf::from(&settings.output_dir);
     std::fs::create_dir_all(&out_dir).map_err(|e| format!("创建输出目录失败: {e}"))?;
-    let out_template = out_dir.join("%(title)s").join("%(title)s.%(ext)s");
+    // Windows 单条路径上限 260 字符，标题过长时 yt-dlp 会在创建目录/文件时报
+    // "[Errno 22] Invalid argument"。按输出目录长度动态截断标题，并附加视频 ID 防重名。
+    let out_len = out_dir.to_string_lossy().chars().count();
+    let per = (200usize.saturating_sub(out_len) / 2).clamp(24, 100);
+    let out_template = out_dir
+        .join(format!("%(title).{per}B [%(id)s]"))
+        .join(format!("%(title).{per}B [%(id)s].%(ext)s"));
     let path_file = std::env::temp_dir().join(format!("ytw-path-{}.txt", uuid::Uuid::new_v4().simple()));
     let mut guards = vec![path_file.clone()];
 
@@ -528,6 +564,9 @@ async fn do_download(app: &AppHandle, task_id: &str, url: &str, opts: &DownloadO
     patch(app, task_id, |t| {
         t.stage = "downloading".into();
         t.message = "正在解析并下载…".into();
+        if t.download_started_at.is_none() {
+            t.download_started_at = Some(now_ms());
+        }
         push_log(
             t,
             if cookie_file.is_some() {
@@ -563,7 +602,14 @@ async fn do_download(app: &AppHandle, task_id: &str, url: &str, opts: &DownloadO
     args.extend(js_solver_args());
     if let Some(proxy) = system_proxy() {
         args.push("--proxy".into());
-        args.push(proxy);
+        args.push(proxy.clone());
+        patch(app, task_id, |t| {
+            push_log(t, &format!("已检测到系统代理，yt-dlp 走 {proxy}"));
+        });
+    } else {
+        patch(app, task_id, |t| {
+            push_log(t, "未检测到系统代理，yt-dlp 直连（若开启 TUN 模式仍可正常联网）");
+        });
     }
     if let Some(p) = cookie_file.as_deref() {
         args.push("--cookies".into());
@@ -577,6 +623,7 @@ async fn do_download(app: &AppHandle, task_id: &str, url: &str, opts: &DownloadO
     // 而 yt-dlp 支持断点续传（.part 文件），所以在应用层重试几次，
     // 每次失败后等待几秒再继续，未完成的部分会接着下，不会从头重下。
     const MAX_ATTEMPTS: usize = 3;
+    let download_clock = Instant::now();
     let mut code = -1;
     let mut tail = String::new();
     let mut attempt = 0;
@@ -652,17 +699,26 @@ async fn do_download(app: &AppHandle, task_id: &str, url: &str, opts: &DownloadO
     }
 
     if code != 0 {
+        let hint = if tail.contains("Errno 22") || tail.contains("Invalid argument") {
+            "；也可能是 Windows 路径过长或文件名非法，可尝试缩短输出目录"
+        } else {
+            ""
+        };
         if tail.is_empty() {
             return Err(format!(
-                "yt-dlp 退出码 {code}（已重试 {MAX_ATTEMPTS} 次），请检查链接/网络/登录态；输出目录：{}",
+                "yt-dlp 退出码 {code}（已重试 {MAX_ATTEMPTS} 次），请检查链接/网络/登录态；输出目录：{}{hint}",
                 out_dir.display()
             ));
         }
         return Err(format!(
-            "yt-dlp 退出码 {code}：{tail}（已重试 {MAX_ATTEMPTS} 次；输出目录：{}；可能是网络临时中断，可稍后重试或检查代理）",
+            "yt-dlp 退出码 {code}：{tail}（已重试 {MAX_ATTEMPTS} 次；输出目录：{}；可能是网络临时中断，可稍后重试或检查代理{hint}）",
             out_dir.display()
         ));
     }
+
+    patch(app, task_id, |t| {
+        t.download_seconds = Some(download_clock.elapsed().as_secs_f64());
+    });
 
     let raw_path = std::fs::read_to_string(&path_file)
         .unwrap_or_default()
@@ -717,10 +773,13 @@ async fn do_download(app: &AppHandle, task_id: &str, url: &str, opts: &DownloadO
             "2".into(),
             mp3.to_string_lossy().to_string(),
         ];
+        let audio_clock = Instant::now();
         match run_process(app, task_id, &ffmpeg, &args, |_| {}).await {
             Ok(0) => {
+                let elapsed = audio_clock.elapsed().as_secs_f64();
                 patch(app, task_id, |t| {
                     t.progress = 77.0;
+                    t.audio_seconds = Some(elapsed);
                     push_log(t, &format!("MP3 已生成: {}", mp3.display()));
                     t.message = "MP3 提取完成".into();
                 });
@@ -766,6 +825,7 @@ async fn do_download(app: &AppHandle, task_id: &str, url: &str, opts: &DownloadO
         if is_canceled(app, task_id) {
             return Ok(());
         }
+        let transcribe_clock = Instant::now();
         let srt = run_whisper(
             app,
             task_id,
@@ -778,6 +838,10 @@ async fn do_download(app: &AppHandle, task_id: &str, url: &str, opts: &DownloadO
             backend == "cpu",
         )
         .await?;
+        let transcribe_secs = transcribe_clock.elapsed().as_secs_f64();
+        patch(app, task_id, |t| {
+            t.transcribe_seconds = Some(transcribe_secs);
+        });
         let final_srt = file.with_file_name(format!("{stem}.srt"));
         if srt != final_srt {
             if std::fs::rename(&srt, &final_srt).is_err() {
@@ -897,7 +961,12 @@ async fn do_transcribe(
         t.message = "正在解析音频…".into();
         t.model = Some(model_id.clone());
     });
+    let audio_clock = Instant::now();
     to_wav(app, task_id, &ffmpeg, input, &wav).await?;
+    let audio_secs = audio_clock.elapsed().as_secs_f64();
+    patch(app, task_id, |t| {
+        t.audio_seconds = Some(audio_secs);
+    });
     if is_canceled(app, task_id) {
         return Ok(());
     }
@@ -907,6 +976,7 @@ async fn do_transcribe(
         t.message = format!("Whisper 转录中（{}）…", backend_label(&backend));
         push_log(t, &format!("转录后端: {}", backend_label(&backend)));
     });
+    let transcribe_clock = Instant::now();
     let srt = run_whisper(
         app,
         task_id,
@@ -919,6 +989,10 @@ async fn do_transcribe(
         backend == "cpu",
     )
     .await?;
+    let transcribe_secs = transcribe_clock.elapsed().as_secs_f64();
+    patch(app, task_id, |t| {
+        t.transcribe_seconds = Some(transcribe_secs);
+    });
     if is_canceled(app, task_id) {
         return Ok(());
     }

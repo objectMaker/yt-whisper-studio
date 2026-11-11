@@ -29,6 +29,10 @@ export interface Task {
   error: string | null;
   model: string | null;
   createdAt: number;
+  downloadStartedAt: number | null;
+  downloadSeconds: number | null;
+  audioSeconds: number | null;
+  transcribeSeconds: number | null;
   log: string[];
 }
 
@@ -218,6 +222,10 @@ const mockTasks: Task[] = [
     error: null,
     model: "base.en",
     createdAt: Date.now(),
+    downloadStartedAt: Date.now() - 42000,
+    downloadSeconds: 36.4,
+    audioSeconds: 2.1,
+    transcribeSeconds: 18.7,
     log: ["已复用内置浏览器 YouTube 会话 Cookie", "[youtube] dQw4w9WgXcQ: Downloading webpage"],
   },
 ];
@@ -298,6 +306,7 @@ export const api = {
   browserBack: () => call<void>("browser_back"),
   browserForward: () => call<void>("browser_forward"),
   browserReload: () => call<void>("browser_reload"),
+  browserPause: () => call<void>("browser_pause"),
   browserUrl: () => call<string | null>("browser_url"),
   extractCookies: () => call<CookieSummary>("extract_youtube_cookies"),
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   CheckCircle2,
   Cpu,
@@ -9,7 +9,6 @@ import {
   Loader2,
   Monitor,
   RefreshCw,
-  Save,
   Settings2,
   Sparkles,
   Trash2,
@@ -168,7 +167,6 @@ export default function ToolsPage({
   settings,
   status,
   assets,
-  onChangeSettings,
   onSaveSettings,
   onRefreshStatus,
   notify,
@@ -176,7 +174,6 @@ export default function ToolsPage({
   settings: Settings | null;
   status: ToolchainStatus | null;
   assets: Record<string, AssetProgress>;
-  onChangeSettings: (s: Settings) => void;
   onSaveSettings: (s: Settings) => void;
   onRefreshStatus: () => void;
   notify: (msg: string, kind?: "ok" | "err") => void;
@@ -196,6 +193,12 @@ export default function ToolsPage({
   };
 
   useEffect(() => setForm(settings), [settings]);
+
+  // 实时保存时用 ref 取最新值，避免快速连续操作时闭包里的 form 过期
+  const formRef = useRef<Settings | null>(form);
+  useEffect(() => {
+    formRef.current = form;
+  }, [form]);
 
   useEffect(() => {
     api
@@ -227,8 +230,13 @@ export default function ToolsPage({
   };
 
   const patch = (p: Partial<Settings>) => {
-    if (!form) return;
-    setForm({ ...form, ...p });
+    const base = formRef.current ?? form;
+    if (!base) return;
+    const next = { ...base, ...p };
+    formRef.current = next;
+    setForm(next);
+    // 即时生效：不再需要保存按钮
+    void onSaveSettings(next);
   };
 
   const install = async (id: string) => {
@@ -583,15 +591,9 @@ export default function ToolsPage({
                       模型目录
                     </button>
                   </div>
-                  <Button
-                    onClick={() => {
-                      onChangeSettings(form);
-                      onSaveSettings(form);
-                    }}
-                    className="gap-2"
-                  >
-                    <Save className="size-3.5" /> 保存设置
-                  </Button>
+                  <span className="flex items-center gap-1.5 text-[10px] text-emerald-400/90">
+                    <CheckCircle2 className="size-3" /> 修改即时生效
+                  </span>
                 </div>
               </CardContent>
             </Card>
