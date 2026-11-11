@@ -1,0 +1,43 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "YT-Whisper Studio",
+  "version": "0.1.0",
+  "identifier": "com.ybf.ytwhisper",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "YT-Whisper Studio",
+        "width": 1280,
+        "height": 840,
+        "minWidth": 1040,
+        "minHeight": 700,
+        "center": true,
+        "dragDropEnabled": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "shortDescription": "YouTube 下载 + whisper.cpp 字幕转录",
+    "longDescription": "内置 YouTube 浏览器，登录态自动复用，一键下载并提取 MP3、调用本地 whisper.cpp 生成 SRT 字幕。",
+    "resources": ["resources/*"]
+  }
+}

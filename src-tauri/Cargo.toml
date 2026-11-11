@@ -1,0 +1,37 @@
+[package]
+name = "yt-whisper-studio"
+version = "0.1.0"
+description = "YouTube 下载 + 原生 whisper.cpp 转录工作站"
+authors = ["ybf"]
+edition = "2021"
+
+[lib]
+name = "yt_whisper_studio_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["unstable"] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["process", "io-util", "sync", "fs", "time", "macros", "rt-multi-thread"] }
+reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls"] }
+futures-util = "0.3"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+dirs = "6"
+which = "7"
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.39"
+windows = { version = "0.62", features = ["Win32_System_Com"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

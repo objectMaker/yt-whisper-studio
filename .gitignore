@@ -1,0 +1,13 @@
+node_modules
+dist
+dist-ssr
+*.local
+.DS_Store
+src-tauri/target
+src-tauri/gen/schemas
+.vscode/*
+!.vscode/extensions.json
+*.download
+.screenshots
+.trae-html-share-packages
+/YT-Whisper-Studio_*-setup.exe
