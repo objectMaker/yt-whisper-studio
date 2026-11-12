@@ -416,8 +416,24 @@ struct TempGuard(Vec<PathBuf>);
 impl Drop for TempGuard {
     fn drop(&mut self) {
         for p in &self.0 {
-            let _ = std::fs::remove_file(p);
+            if p.is_dir() {
+                let _ = std::fs::remove_dir_all(p);
+            } else {
+                let _ = std::fs::remove_file(p);
+            }
         }
+    }
+}
+
+/// 转录用的临时目录：放在最终字幕文件所在的文件夹里（和输出同盘），
+/// 不放在系统 Temp 里。里面放转 16k 的 wav 和 whisper 的输出文件；
+/// 任务结束（成功、失败或取消）时由 TempGuard 整个删掉。
+/// 这样 whisper 的 srt 可以直接重命名为最终字幕，不用跨盘复制，
+/// 也不会在 Temp 里留下 wav/srt。
+fn transcribe_tmpdir(anchor: &Path) -> PathBuf {
+    match anchor.parent().filter(|p| !p.as_os_str().is_empty()) {
+        Some(dir) => dir.join(format!(".ytw-tmp-{}", uuid::Uuid::new_v4().simple())),
+        None => std::env::temp_dir().join(format!("ytw-{}", uuid::Uuid::new_v4().simple())),
     }
 }
 
@@ -1002,8 +1018,10 @@ async fn do_download(app: &AppHandle, task_id: &str, url: &str, opts: &DownloadO
             push_log(t, &format!("转录后端: {}", backend_label(&backend)));
         });
         let source = audio_for_whisper.unwrap_or_else(|| file.clone());
-        let wav = std::env::temp_dir().join(format!("ytw-{}.wav", uuid::Uuid::new_v4().simple()));
-        let _wav_guard = TempGuard(vec![wav.clone()]);
+        let tmpdir = transcribe_tmpdir(&file);
+        std::fs::create_dir_all(&tmpdir).map_err(|e| e.to_string())?;
+        let _tmp_guard = TempGuard(vec![tmpdir.clone()]);
+        let wav = tmpdir.join("audio.wav");
         to_wav(app, task_id, &ffmpeg, &source, &wav).await?;
         if is_canceled(app, task_id) {
             return Ok(());
@@ -1141,8 +1159,10 @@ async fn do_transcribe(
         .language
         .clone()
         .unwrap_or_else(|| settings.language.clone());
-    let wav = std::env::temp_dir().join(format!("ytw-{}.wav", uuid::Uuid::new_v4().simple()));
-    let _wav_guard = TempGuard(vec![wav.clone()]);
+    let tmpdir = transcribe_tmpdir(input);
+    std::fs::create_dir_all(&tmpdir).map_err(|e| e.to_string())?;
+    let _tmp_guard = TempGuard(vec![tmpdir.clone()]);
+    let wav = tmpdir.join("audio.wav");
     patch(app, task_id, |t| {
         t.stage = "extracting".into();
         t.progress = 5.0;
@@ -1270,5 +1290,65 @@ fn collect_media(dir: &Path, out: &mut Vec<String>, depth: u32) {
                 out.push(p.to_string_lossy().to_string());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transcribe_tmpdir_lives_next_to_output() {
+        let anchor = std::env::temp_dir()
+            .join("title [abc]")
+            .join("title [abc].mp4");
+        let dir = transcribe_tmpdir(&anchor);
+        assert_eq!(
+            dir.parent().unwrap(),
+            std::env::temp_dir().join("title [abc]")
+        );
+        assert!(dir
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(".ytw-tmp-"));
+    }
+
+    #[test]
+    fn transcribe_tmpdir_falls_back_without_parent() {
+        let dir = transcribe_tmpdir(Path::new("video.mp4"));
+        assert_eq!(dir.parent().unwrap(), std::env::temp_dir());
+    }
+
+    #[test]
+    fn temp_guard_removes_dir_and_files() {
+        let base =
+            std::env::temp_dir().join(format!("ytw-guard-test-{}", uuid::Uuid::new_v4().simple()));
+        let dir = base.join(".ytw-tmp-x");
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav = dir.join("audio.wav");
+        let srt = dir.join("audio.srt");
+        std::fs::write(&wav, b"wav").unwrap();
+        std::fs::write(&srt, b"srt").unwrap();
+        {
+            let _g = TempGuard(vec![dir.clone()]);
+        }
+        assert!(!dir.exists());
+        assert!(!wav.exists());
+        assert!(!srt.exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn temp_guard_removes_plain_files() {
+        let f = std::env::temp_dir().join(format!(
+            "ytw-guard-file-{}.txt",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::write(&f, b"x").unwrap();
+        {
+            let _g = TempGuard(vec![f.clone()]);
+        }
+        assert!(!f.exists());
     }
 }
