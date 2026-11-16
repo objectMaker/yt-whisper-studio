@@ -1,4 +1,5 @@
 mod browser;
+mod control;
 mod cookies;
 mod hardware;
 mod net;
@@ -137,6 +138,8 @@ pub fn run() {
             let settings = settings::load(app.handle());
             app.manage(AppState::new(settings));
             tasks::restore_tasks(app.handle());
+            // 本地控制 API：供 echo-pipeline 远程驱动（绑定失败不影响桌面 GUI）。
+            control::start(app.handle().clone());
             // 任务列表每 2 秒按需落盘，避免进度事件频繁写文件
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {

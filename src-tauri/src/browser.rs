@@ -151,3 +151,57 @@ pub async fn extract_youtube_cookies(window: Window) -> Result<CookieSummary, St
         names: list.iter().map(|c| c.name.clone()).take(40).collect(),
     })
 }
+
+// ---------------------------------------------------------------------------
+// 控制 API 专用辅助（不影响桌面 GUI 原有交互）
+// ---------------------------------------------------------------------------
+
+/// 内置浏览器 webview 是否已创建（冷启动时为 false）。
+pub fn is_ready(app: &tauri::AppHandle) -> bool {
+    app.get_webview(LABEL).is_some()
+}
+
+/// 当前可读到的 YouTube Cookie 数量，用于健康检查展示。
+pub fn cookie_count(app: &tauri::AppHandle) -> usize {
+    app.get_webview(LABEL)
+        .and_then(|wv| cookies::read_youtube_cookies(&wv).ok())
+        .map(|list| list.len())
+        .unwrap_or(0)
+}
+
+/// 冷启动时在主线程静默创建一个隐藏 webview，让 Cookie 会话开始加载。
+/// 已经存在时直接返回 false，绝不改变用户正在使用的浏览器状态。
+pub fn ensure_hidden(app: &tauri::AppHandle) -> Result<bool, String> {
+    let app_for_main = app.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.run_on_main_thread(move || {
+        let _ = tx.send(ensure_hidden_inner(&app_for_main));
+    })
+    .map_err(|e| format!("提交主线程任务失败: {}", e))?;
+    rx.recv_timeout(std::time::Duration::from_secs(20))
+        .map_err(|_| "等待主线程创建浏览器超时".to_string())?
+}
+
+fn ensure_hidden_inner(app: &tauri::AppHandle) -> Result<bool, String> {
+    let window = app
+        .get_window("main")
+        .ok_or_else(|| "主窗口尚未就绪".to_string())?;
+    if find(&window).is_some() {
+        return Ok(false);
+    }
+    let state = app.state::<crate::tasks::AppState>();
+    let _guard = state.browser_lock.lock().unwrap();
+    if find(&window).is_some() {
+        return Ok(false);
+    }
+    let url: tauri::Url = HOME.parse().map_err(|_| "无效地址".to_string())?;
+    let webview = window
+        .add_child(
+            WebviewBuilder::new(LABEL, WebviewUrl::External(url)),
+            LogicalPosition::new(0.0, 0.0),
+            LogicalSize::new(2.0, 2.0),
+        )
+        .map_err(|e| format!("创建内置浏览器失败: {e}"))?;
+    let _ = webview.hide();
+    Ok(true)
+}

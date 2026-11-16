@@ -25,6 +25,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 dirs = "6"
 which = "7"
 uuid = { version = "1", features = ["v4"] }
+tiny_http = "0.12"
 
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.39"
