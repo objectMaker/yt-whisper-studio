@@ -56,6 +56,8 @@ pub struct Task {
     pub message: String,
     pub file_path: Option<String>,
     pub srt_path: Option<String>,
+    #[serde(default)]
+    pub words_json_path: Option<String>,
     pub error: Option<String>,
     pub model: Option<String>,
     pub created_at: u64,
@@ -91,6 +93,7 @@ impl Task {
             message: "排队中".into(),
             file_path: None,
             srt_path: None,
+            words_json_path: None,
             error: None,
             model: None,
             created_at: now_ms(),
@@ -265,6 +268,7 @@ fn reset_for_retry(app: &AppHandle, id: &str) {
         t.eta.clear();
         t.error = None;
         t.srt_path = None;
+        t.words_json_path = None;
         t.download_started_at = None;
         t.download_seconds = None;
         t.audio_seconds = None;
@@ -616,6 +620,11 @@ async fn to_wav(app: &AppHandle, task_id: &str, ffmpeg: &Path, input: &Path, out
     Ok(())
 }
 
+pub(crate) struct WhisperOutput {
+    pub srt_path: PathBuf,
+    pub json_path: Option<PathBuf>,
+}
+
 async fn run_whisper(
     app: &AppHandle,
     task_id: &str,
@@ -626,7 +635,7 @@ async fn run_whisper(
     base_progress: f64,
     span: f64,
     cpu_only: bool,
-) -> Result<PathBuf, String> {
+) -> Result<WhisperOutput, String> {
     let prefix = wav.with_extension("");
     let of = prefix.to_string_lossy().to_string();
     let mut args = vec![
@@ -635,6 +644,7 @@ async fn run_whisper(
         "-f".to_string(),
         wav.to_string_lossy().to_string(),
         "-osrt".to_string(),
+        "-ojf".to_string(),
         "-of".to_string(),
         of,
         "-pp".to_string(),
@@ -671,8 +681,13 @@ async fn run_whisper(
         return Err(format!("whisper.cpp 转录失败（退出码 {code}）"));
     }
     let srt = prefix.with_extension("srt");
+    let json = prefix.with_extension("json");
     if srt.exists() {
-        Ok(srt)
+        let json_path = if json.exists() { Some(json) } else { None };
+        Ok(WhisperOutput {
+            srt_path: srt,
+            json_path,
+        })
     } else {
         Err("未生成 SRT 字幕文件".into())
     }
@@ -1027,7 +1042,7 @@ async fn do_download(app: &AppHandle, task_id: &str, url: &str, opts: &DownloadO
             return Ok(());
         }
         let transcribe_clock = Instant::now();
-        let srt = run_whisper(
+        let whisper_out = run_whisper(
             app,
             task_id,
             &whisper,
@@ -1044,13 +1059,24 @@ async fn do_download(app: &AppHandle, task_id: &str, url: &str, opts: &DownloadO
             t.transcribe_seconds = Some(transcribe_secs);
         });
         let final_srt = file.with_file_name(format!("{stem}.srt"));
-        if srt != final_srt {
-            if std::fs::rename(&srt, &final_srt).is_err() {
-                let _ = std::fs::copy(&srt, &final_srt);
+        if whisper_out.srt_path != final_srt {
+            if std::fs::rename(&whisper_out.srt_path, &final_srt).is_err() {
+                let _ = std::fs::copy(&whisper_out.srt_path, &final_srt);
             }
+        }
+        let mut words_path_str = None;
+        if let Some(ref json_path) = whisper_out.json_path {
+            let final_words = file.with_file_name(format!("{stem}.words.json"));
+            if json_path != &final_words {
+                if std::fs::rename(json_path, &final_words).is_err() {
+                    let _ = std::fs::copy(json_path, &final_words);
+                }
+            }
+            words_path_str = Some(final_words.to_string_lossy().to_string());
         }
         patch(app, task_id, |t| {
             t.srt_path = Some(final_srt.to_string_lossy().to_string());
+            t.words_json_path = words_path_str;
             push_log(t, &format!("字幕已生成: {}", final_srt.display()));
         });
     }
@@ -1185,7 +1211,7 @@ async fn do_transcribe(
         push_log(t, &format!("转录后端: {}", backend_label(&backend)));
     });
     let transcribe_clock = Instant::now();
-    let srt = run_whisper(
+    let whisper_out = run_whisper(
         app,
         task_id,
         &whisper,
@@ -1205,15 +1231,26 @@ async fn do_transcribe(
         return Ok(());
     }
     let final_srt = input.with_extension("srt");
-    if srt != final_srt {
-        if std::fs::rename(&srt, &final_srt).is_err() {
-            std::fs::copy(&srt, &final_srt).map_err(|e| e.to_string())?;
+    if whisper_out.srt_path != final_srt {
+        if std::fs::rename(&whisper_out.srt_path, &final_srt).is_err() {
+            std::fs::copy(&whisper_out.srt_path, &final_srt).map_err(|e| e.to_string())?;
         }
+    }
+    let mut words_path_str = None;
+    if let Some(ref json_path) = whisper_out.json_path {
+        let final_words = input.with_extension("words.json");
+        if json_path != &final_words {
+            if std::fs::rename(json_path, &final_words).is_err() {
+                let _ = std::fs::copy(json_path, &final_words);
+            }
+        }
+        words_path_str = Some(final_words.to_string_lossy().to_string());
     }
     patch(app, task_id, |t| {
         t.stage = "done".into();
         t.progress = 100.0;
         t.srt_path = Some(final_srt.to_string_lossy().to_string());
+        t.words_json_path = words_path_str;
         t.message = "转录完成".into();
         push_log(t, &format!("字幕已生成: {}", final_srt.display()));
     });
@@ -1350,5 +1387,43 @@ mod tests {
             let _g = TempGuard(vec![f.clone()]);
         }
         assert!(!f.exists());
+    }
+
+    #[test]
+    fn task_serialization_roundtrip_words_json_path() {
+        let mut t = Task::new("test-1".into(), "transcribe");
+        t.srt_path = Some("/path/to/test.srt".into());
+        t.words_json_path = Some("/path/to/test.words.json".into());
+
+        let json = serde_json::to_string(&t).unwrap();
+        assert!(json.contains("\"wordsJsonPath\":\"/path/to/test.words.json\""));
+
+        let restored: Task = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            restored.words_json_path.as_deref(),
+            Some("/path/to/test.words.json")
+        );
+    }
+
+    #[test]
+    fn task_deserialization_backward_compatible_without_words_json() {
+        // 旧版本没有 wordsJsonPath 字段的任务 JSON
+        let legacy_json = r#"{
+            "id": "legacy-1",
+            "kind": "download",
+            "title": "Old Task",
+            "stage": "done",
+            "progress": 100.0,
+            "speed": "",
+            "eta": "",
+            "message": "完成",
+            "createdAt": 12345678,
+            "extractMp3": false,
+            "transcribe": true,
+            "log": []
+        }"#;
+
+        let task: Task = serde_json::from_str(legacy_json).unwrap();
+        assert!(task.words_json_path.is_none());
     }
 }
