@@ -441,11 +441,53 @@ fn transcribe_tmpdir(anchor: &Path) -> PathBuf {
     }
 }
 
+#[cfg(windows)]
+pub fn to_short_path(path: &Path) -> PathBuf {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    extern "system" {
+        fn GetShortPathNameW(
+            lpszLongPath: *const u16,
+            lpszShortPath: *mut u16,
+            cchBuffer: u32,
+        ) -> u32;
+    }
+
+    if !path.exists() {
+        if let (Some(parent), Some(file_name)) = (path.parent(), path.file_name()) {
+            let short_parent = to_short_path(parent);
+            return short_parent.join(file_name);
+        }
+        return path.to_path_buf();
+    }
+
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    wide.push(0);
+
+    let len = unsafe { GetShortPathNameW(wide.as_ptr(), std::ptr::null_mut(), 0) };
+    if len == 0 {
+        return path.to_path_buf();
+    }
+    let mut buf = vec![0u16; len as usize];
+    let res = unsafe { GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), len) };
+    if res == 0 || res >= len {
+        return path.to_path_buf();
+    }
+    PathBuf::from(OsString::from_wide(&buf[..res as usize]))
+}
+
+#[cfg(not(windows))]
+pub fn to_short_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
 fn sanitize_name(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
         match ch {
-            '⧸' | '／' | '\\' | '|' | '?' | '*' | '<' | '>' | '"' | ':' => out.push('-'),
+            // 半角与全角 Windows 非法文件名字符（以及 yt-dlp --windows-filenames 转换所得的全角符号）
+            '⧸' | '／' | '＼' | '\\' | '/' | '|' | '｜' | '?' | '？' | '*' | '＊' | '<' | '＜' | '>' | '＞' | '"' | '＂' | '”' | '“' | ':' | '：' => out.push('-'),
             c if (c as u32) < 0x20 => out.push('-'),
             _ => out.push(ch),
         }
@@ -637,12 +679,16 @@ async fn run_whisper(
     cpu_only: bool,
 ) -> Result<WhisperOutput, String> {
     let prefix = wav.with_extension("");
-    let of = prefix.to_string_lossy().to_string();
+    let short_whisper = to_short_path(whisper);
+    let short_model = to_short_path(model);
+    let short_wav = to_short_path(wav);
+    let short_prefix = to_short_path(&prefix);
+    let of = short_prefix.to_string_lossy().to_string();
     let mut args = vec![
         "-m".to_string(),
-        model.to_string_lossy().to_string(),
+        short_model.to_string_lossy().to_string(),
         "-f".to_string(),
-        wav.to_string_lossy().to_string(),
+        short_wav.to_string_lossy().to_string(),
         "-osrt".to_string(),
         "-ojf".to_string(),
         "-of".to_string(),
@@ -662,7 +708,7 @@ async fn run_whisper(
         args.push(language.to_string());
     }
     let mut last_emit = 0f64;
-    let code = run_process(app, task_id, whisper, &args, |line| {
+    let code = run_process(app, task_id, &short_whisper, &args, |line| {
         if let Some(pct) = parse_whisper_progress(line) {
             if pct - last_emit >= 0.8 {
                 last_emit = pct;
@@ -682,11 +728,30 @@ async fn run_whisper(
     }
     let srt = prefix.with_extension("srt");
     let json = prefix.with_extension("json");
-    if srt.exists() {
-        let json_path = if json.exists() { Some(json) } else { None };
+    let srt_path = if srt.exists() {
+        Some(srt)
+    } else {
+        let short_srt = short_prefix.with_extension("srt");
+        if short_srt.exists() {
+            Some(short_srt)
+        } else {
+            None
+        }
+    };
+    if let Some(actual_srt) = srt_path {
+        let actual_json = if json.exists() {
+            Some(json)
+        } else {
+            let short_json = short_prefix.with_extension("json");
+            if short_json.exists() {
+                Some(short_json)
+            } else {
+                None
+            }
+        };
         Ok(WhisperOutput {
-            srt_path: srt,
-            json_path,
+            srt_path: actual_srt,
+            json_path: actual_json,
         })
     } else {
         Err("未生成 SRT 字幕文件".into())
@@ -1425,5 +1490,40 @@ mod tests {
 
         let task: Task = serde_json::from_str(legacy_json).unwrap();
         assert!(task.words_json_path.is_none());
+    }
+
+    #[test]
+    fn sanitize_name_cleans_ytdlp_fullwidth_symbols() {
+        let dirty = "Everyday English Conversation Practice ｜ 30 Minutes English Listening：Test？＊＜＞＂＼⧸／ [henIVlCPVIY]";
+        let clean = sanitize_name(dirty);
+        assert_eq!(
+            clean,
+            "Everyday English Conversation Practice - 30 Minutes English Listening-Test-------- [henIVlCPVIY]"
+        );
+        assert!(!clean.contains('｜'));
+        assert!(!clean.contains('：'));
+        assert!(!clean.contains('？'));
+        assert!(!clean.contains('＊'));
+        assert!(!clean.contains('＜'));
+        assert!(!clean.contains('＞'));
+        assert!(!clean.contains('＂'));
+        assert!(!clean.contains('＼'));
+        assert!(!clean.contains('⧸'));
+        assert!(!clean.contains('／'));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn to_short_path_works_with_existing_and_nonexisting() {
+        let temp = std::env::temp_dir();
+        let short_temp = to_short_path(&temp);
+        assert!(short_temp.exists());
+
+        let non_existing = temp.join("sub_dir_test_non_existing").join("audio.wav");
+        let short_non_existing = to_short_path(&non_existing);
+        assert_eq!(
+            short_non_existing.file_name().unwrap(),
+            "audio.wav"
+        );
     }
 }
