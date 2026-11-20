@@ -47,7 +47,7 @@ impl Default for Settings {
             .to_string();
         Self {
             output_dir,
-            quality: "best".into(),
+            quality: "720".into(),
             extract_mp3: true,
             transcribe: true,
             language: "en".into(),

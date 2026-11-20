@@ -97,7 +97,7 @@ export default function App() {
   );
 
   const startDownload = useCallback(
-    async (url: string, options: { extractMp3?: boolean; transcribe?: boolean }) => {
+    async (url: string, options: { extractMp3?: boolean; transcribe?: boolean; quality?: string; model?: string }) => {
       try {
         await api.startDownload(url, options);
         setTab("queue");
@@ -213,7 +213,7 @@ export default function App() {
 
         <div className="min-h-0 flex-1">
           {tab === "browser" && (
-            <BrowserPage settings={settings} onStartDownload={startDownload} notify={notify} />
+            <BrowserPage settings={settings} status={status} onStartDownload={startDownload} notify={notify} />
           )}
           {tab === "queue" && (
             <QueuePage tasks={tasks} settings={settings} notify={notify} />

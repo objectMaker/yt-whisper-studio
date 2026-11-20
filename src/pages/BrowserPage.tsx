@@ -12,13 +12,22 @@ import {
   ShieldCheck,
   Sparkles,
 } from "lucide-react";
-import { api, isTauri, type CookieSummary, type Settings } from "@/lib/api";
+import { api, isTauri, type CookieSummary, type Settings, type ToolchainStatus } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
+import { Select } from "@/components/ui/select";
 import { Modal } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+
+const QUALITY_OPTIONS = [
+  { value: "720", label: "720p（推荐默认 / 极速省流平衡）" },
+  { value: "1080", label: "1080p（高清）" },
+  { value: "best", label: "最高源片画质（自动合并）" },
+  { value: "480", label: "480p（标清）" },
+  { value: "360", label: "360p（快速预览）" },
+];
 
 function youtubeVideoId(u: string | null): string | null {
   if (!u) return null;
@@ -39,11 +48,13 @@ function youtubeVideoId(u: string | null): string | null {
 
 export default function BrowserPage({
   settings,
+  status,
   onStartDownload,
   notify,
 }: {
   settings: Settings | null;
-  onStartDownload: (url: string, o: { extractMp3?: boolean; transcribe?: boolean }) => void;
+  status?: ToolchainStatus | null;
+  onStartDownload: (url: string, o: { extractMp3?: boolean; transcribe?: boolean; quality?: string; model?: string }) => void;
   notify: (msg: string, kind?: "ok" | "err") => void;
 }) {
   const holderRef = useRef<HTMLDivElement>(null);
@@ -55,6 +66,8 @@ export default function BrowserPage({
   const [target, setTarget] = useState<string | null>(null);
   const [extractMp3, setExtractMp3] = useState(settings?.extractMp3 ?? true);
   const [transcribe, setTranscribe] = useState(settings?.transcribe ?? true);
+  const [quality, setQuality] = useState(settings?.quality ?? "720");
+  const [model, setModel] = useState(settings?.model ?? "base.en");
   const [login, setLogin] = useState<CookieSummary | null>(null);
   const [checking, setChecking] = useState(false);
   const [ready, setReady] = useState(false);
@@ -263,6 +276,8 @@ export default function BrowserPage({
               onClick={() => {
                 setExtractMp3(settings?.extractMp3 ?? true);
                 setTranscribe(settings?.transcribe ?? true);
+                setQuality(settings?.quality ?? "720");
+                setModel(settings?.model ?? "base.en");
                 setTarget(downloadUrl);
                 setModalOpen(true);
               }}
@@ -299,7 +314,7 @@ export default function BrowserPage({
             <Button
               onClick={() => {
                 if (!target) return;
-                onStartDownload(target, { extractMp3, transcribe });
+                onStartDownload(target, { extractMp3, transcribe, quality, model });
                 setModalOpen(false);
               }}
             >
@@ -309,6 +324,33 @@ export default function BrowserPage({
         }
       >
         <div className="space-y-3">
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <label className="text-[11px] font-medium text-muted-foreground">本次下载清晰度</label>
+              <Select
+                value={quality}
+                onValueChange={setQuality}
+                options={QUALITY_OPTIONS}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-[11px] font-medium text-muted-foreground">本次转译模型</label>
+              <Select
+                value={model}
+                onValueChange={setModel}
+                options={(status?.models ?? []).length > 0 ? (status?.models ?? []).map((m) => ({
+                  value: m.id,
+                  label: `${m.label}${m.installed ? "" : " · 未下载"}`,
+                })) : [
+                  { value: "base.en", label: "base.en (推荐)" },
+                  { value: "small", label: "small" },
+                  { value: "medium", label: "medium" },
+                  { value: "large-v3", label: "large-v3" },
+                ]}
+              />
+            </div>
+          </div>
+
           <label className="flex items-center justify-between rounded-lg border border-border/70 bg-secondary/30 px-4 py-3">
             <div>
               <div className="text-xs font-medium">提取 MP3 音频</div>
@@ -322,7 +364,7 @@ export default function BrowserPage({
             <div>
               <div className="text-xs font-medium">生成 SRT 字幕</div>
               <div className="mt-0.5 text-[11px] text-muted-foreground">
-                使用本地 whisper.cpp（{settings?.model}）
+                使用本地 whisper.cpp（当前选中：{model}）
               </div>
             </div>
             <Switch checked={transcribe} onCheckedChange={setTranscribe} />

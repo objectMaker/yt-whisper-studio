@@ -47,9 +47,9 @@ const LANG_OPTIONS = [
 ];
 
 const QUALITY_OPTIONS = [
-  { value: "best", label: "最佳画质（自动合并）" },
+  { value: "720", label: "720p（推荐默认 / 极速省流平衡）" },
   { value: "1080", label: "1080p" },
-  { value: "720", label: "720p" },
+  { value: "best", label: "最佳画质（自动合并）" },
   { value: "480", label: "480p" },
   { value: "360", label: "360p" },
 ];

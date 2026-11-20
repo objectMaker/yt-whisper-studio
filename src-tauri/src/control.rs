@@ -100,6 +100,8 @@ fn handle(mut request: Request, app: &AppHandle) {
         let options = DownloadOptions {
             extract_mp3: body.extract_mp3,
             transcribe: body.transcribe,
+            quality: body.quality,
+            model: body.model,
         };
         match tasks::start_download(app.clone(), body.url, options) {
             Ok(task) => respond_ok(request, json!({ "task_id": task.id })),
@@ -213,6 +215,10 @@ struct DownloadReq {
     extract_mp3: Option<bool>,
     #[serde(default)]
     transcribe: Option<bool>,
+    #[serde(default)]
+    quality: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
 }
 
 #[derive(Deserialize)]

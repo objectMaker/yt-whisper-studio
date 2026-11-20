@@ -109,13 +109,17 @@ impl Task {
     }
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct DownloadOptions {
     #[serde(default)]
     pub extract_mp3: Option<bool>,
     #[serde(default)]
     pub transcribe: Option<bool>,
+    #[serde(default)]
+    pub quality: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -299,6 +303,8 @@ pub fn retry(app: &AppHandle, id: &str) -> Result<(), String> {
         let opts = DownloadOptions {
             extract_mp3: Some(task.extract_mp3),
             transcribe: Some(task.transcribe),
+            quality: None,
+            model: task.model.clone(),
         };
         reset_for_retry(app, id);
         tauri::async_runtime::spawn(async move {
@@ -772,6 +778,7 @@ pub fn start_download(app: AppHandle, url: String, opts: DownloadOptions) -> Res
         let settings = state.settings.lock().unwrap().clone();
         task.extract_mp3 = opts.extract_mp3.unwrap_or(settings.extract_mp3);
         task.transcribe = opts.transcribe.unwrap_or(settings.transcribe);
+        task.model = Some(opts.model.clone().unwrap_or(settings.model));
     }
     let snapshot = task.clone();
     {
@@ -850,10 +857,11 @@ async fn do_download(app: &AppHandle, task_id: &str, url: &str, opts: &DownloadO
         );
     });
 
-    let fmt = if settings.quality == "best" {
+    let quality = opts.quality.as_deref().unwrap_or(&settings.quality);
+    let fmt = if quality == "best" {
         "bv*+ba/b".to_string()
     } else {
-        format!("bv*[height<={}]+ba/b", settings.quality)
+        format!("bv*[height<={}]+ba/b", quality)
     };
 
     // 必须使用登录 Cookie：匿名请求会触发 YouTube 风控甚至封 IP。
@@ -1075,7 +1083,7 @@ async fn do_download(app: &AppHandle, task_id: &str, url: &str, opts: &DownloadO
     }
 
     if transcribe {
-        let model_id = settings.model.clone();
+        let model_id = opts.model.clone().unwrap_or_else(|| settings.model.clone());
         let model = match tools::model_path(app, &model_id) {
             Some(p) if p.exists() => p,
             _ if settings.auto_download_model => {
@@ -1157,10 +1165,18 @@ async fn do_download(app: &AppHandle, task_id: &str, url: &str, opts: &DownloadO
     });
     if settings.open_folder {
         if let Some(dir) = final_dir {
-            let _ = std::process::Command::new("explorer")
-                .arg(dir)
-                .creation_flags(CREATE_NO_WINDOW)
-                .spawn();
+            let mut clean = dir.to_string_lossy().to_string().replace('/', "\\");
+            while clean.ends_with('\\') && clean.len() > 3 {
+                clean.pop();
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                let _ = std::process::Command::new("explorer")
+                    .raw_arg(format!("\"{clean}\""))
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .spawn();
+            }
         }
     }
     Ok(())
@@ -1321,11 +1337,18 @@ async fn do_transcribe(
     });
     if settings.open_folder {
         if let Some(dir) = input.parent() {
-            let mut cmd = std::process::Command::new("explorer");
-            cmd.arg(dir);
+            let mut clean = dir.to_string_lossy().to_string().replace('/', "\\");
+            while clean.ends_with('\\') && clean.len() > 3 {
+                clean.pop();
+            }
             #[cfg(windows)]
-            cmd.creation_flags(CREATE_NO_WINDOW);
-            let _ = cmd.spawn();
+            {
+                use std::os::windows::process::CommandExt;
+                let _ = std::process::Command::new("explorer")
+                    .raw_arg(format!("\"{clean}\""))
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .spawn();
+            }
         }
     }
     Ok(())

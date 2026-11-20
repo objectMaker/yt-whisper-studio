@@ -119,14 +119,49 @@ async fn scan_folder(folder: String) -> Result<Vec<MediaFile>, String> {
 
 #[tauri::command]
 fn open_path(path: String) -> Result<(), String> {
-    let mut cmd = std::process::Command::new("explorer");
-    cmd.arg(path);
+    let raw = path.trim().trim_matches('"');
+    let mut clean = raw.replace('/', "\\");
+    while clean.ends_with('\\') && clean.len() > 3 {
+        clean.pop();
+    }
+    let p = std::path::Path::new(&clean);
+    let (target, is_file) = if p.is_file() {
+        (clean.clone(), true)
+    } else if p.is_dir() {
+        (clean.clone(), false)
+    } else if let Some(parent) = p.parent().filter(|par| par.is_dir()) {
+        (parent.to_string_lossy().to_string(), false)
+    } else {
+        return Err(format!("目标路径不存在: {clean}"));
+    };
+
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
+        let mut clean_target = target.replace('/', "\\");
+        while clean_target.ends_with('\\') && clean_target.len() > 3 {
+            clean_target.pop();
+        }
+        let args = if is_file {
+            format!("/select,\"{clean_target}\"")
+        } else {
+            format!("\"{clean_target}\"")
+        };
+        std::process::Command::new("explorer")
+            .raw_arg(args)
+            .creation_flags(0x0800_0000)
+            .spawn()
+            .map_err(|e| e.to_string())?;
     }
-    cmd.spawn().map_err(|e| e.to_string())?;
+    #[cfg(not(windows))]
+    {
+        let target_dir = if is_file {
+            std::path::Path::new(&target).parent().unwrap_or(std::path::Path::new(".")).to_string_lossy().to_string()
+        } else {
+            target
+        };
+        let _ = open::that(target_dir);
+    }
     Ok(())
 }
 

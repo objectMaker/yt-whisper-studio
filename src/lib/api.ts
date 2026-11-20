@@ -133,7 +133,7 @@ export interface Bounds {
 
 const mockSettings: Settings = {
   outputDir: "D:\\youtube_videos",
-  quality: "best",
+  quality: "720",
   extractMp3: true,
   transcribe: true,
   language: "en",
@@ -300,7 +300,7 @@ export const api = {
   cancelTask: (id: string) => call<void>("cancel_task", { id }),
   retryTask: (id: string) => call<void>("retry_task", { id }),
   removeTask: (id: string) => call<void>("remove_task", { id }),
-  startDownload: (url: string, options: { extractMp3?: boolean; transcribe?: boolean }) =>
+  startDownload: (url: string, options: { extractMp3?: boolean; transcribe?: boolean; quality?: string; model?: string }) =>
     call<Task>("start_download", { url, options }),
   startTranscribe: (paths: string[], options: { model?: string; language?: string }) =>
     call<Task[]>("start_transcribe", { paths, options }),
