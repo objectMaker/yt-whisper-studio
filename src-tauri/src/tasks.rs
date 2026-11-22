@@ -870,6 +870,8 @@ async fn do_download(app: &AppHandle, task_id: &str, url: &str, opts: &DownloadO
         "--no-playlist".into(),
         "--no-mtime".into(),
         "--windows-filenames".into(),
+        "--concurrent-fragments".into(),
+        "4".into(),
         "-f".into(),
         fmt.clone(),
         "--merge-output-format".into(),

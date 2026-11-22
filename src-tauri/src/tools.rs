@@ -27,8 +27,8 @@ pub const MODELS: &[ModelDef] = &[
     ModelDef { id: "medium.en", file: "ggml-medium.en.bin", label: "Medium (英文 · 精确)", bytes: 1_533_774_784 },
     ModelDef { id: "small", file: "ggml-small.bin", label: "Small (多语言 · 轻量)", bytes: 487_601_967 },
     ModelDef { id: "medium", file: "ggml-medium.bin", label: "Medium (多语言 · 均衡)", bytes: 1_533_763_059 },
-    ModelDef { id: "large-v3-turbo", file: "ggml-large-v3-turbo.bin", label: "Large v3 Turbo (多语言 · 最准)", bytes: 1_624_555_275 },
-    ModelDef { id: "large-v3-turbo-q5_0", file: "ggml-large-v3-turbo-q5_0.bin", label: "Large v3 Turbo Q5 (多语言 · 快且省)", bytes: 574_041_195 },
+    ModelDef { id: "large-v3", file: "ggml-large-v3.bin", label: "Large v3 (多语言 · 最高精度标准版)", bytes: 3_094_746_471 },
+    ModelDef { id: "large-v3-q5_0", file: "ggml-large-v3-q5_0.bin", label: "Large v3 Q5 (多语言 · 极高精度量化版)", bytes: 1_079_896_416 },
 ];
 
 #[derive(Serialize, Clone)]
