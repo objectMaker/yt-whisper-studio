@@ -67,7 +67,7 @@ export default function BrowserPage({
   const [extractMp3, setExtractMp3] = useState(settings?.extractMp3 ?? true);
   const [transcribe, setTranscribe] = useState(settings?.transcribe ?? true);
   const [quality, setQuality] = useState(settings?.quality ?? "720");
-  const [model, setModel] = useState(settings?.model ?? "base.en");
+  const [model, setModel] = useState(settings?.model ?? "medium.en");
   const [login, setLogin] = useState<CookieSummary | null>(null);
   const [checking, setChecking] = useState(false);
   const [ready, setReady] = useState(false);
@@ -342,10 +342,11 @@ export default function BrowserPage({
                   value: m.id,
                   label: `${m.label}${m.installed ? "" : " · 未下载"}`,
                 })) : [
-                  { value: "base.en", label: "base.en (推荐)" },
+                  { value: "medium.en", label: "medium.en (推荐主力)" },
+                  { value: "base.en", label: "base.en (轻量)" },
                   { value: "small", label: "small" },
                   { value: "medium", label: "medium" },
-                  { value: "large-v3", label: "large-v3" },
+                  { value: "large-v3", label: "large-v3 (备选)" },
                 ]}
               />
             </div>

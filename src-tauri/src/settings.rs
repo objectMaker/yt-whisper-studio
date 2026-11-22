@@ -51,7 +51,7 @@ impl Default for Settings {
             extract_mp3: true,
             transcribe: true,
             language: "en".into(),
-            model: "base.en".into(),
+            model: "medium.en".into(),
             open_folder: false,
             concurrency: default_concurrency(),
             use_embedded_cookies: true,

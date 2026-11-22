@@ -137,7 +137,7 @@ const mockSettings: Settings = {
   extractMp3: true,
   transcribe: true,
   language: "en",
-  model: "base.en",
+  model: "medium.en",
   openFolder: false,
   concurrency: 2,
   useEmbeddedCookies: true,
