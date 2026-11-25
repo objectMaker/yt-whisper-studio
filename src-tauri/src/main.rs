@@ -2,14 +2,41 @@
 
 #[cfg(windows)]
 fn ensure_webview2_proxy_bypass() {
+    const REQUIRED_HOSTS: &[&str] = &["<local>", "*.localhost", "tauri.localhost", "127.0.0.1", "localhost"];
     let current_args = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default();
-    let bypass_arg = "--proxy-bypass-list=<local>;*.localhost;tauri.localhost;127.0.0.1;localhost";
     if current_args.is_empty() {
-        std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", bypass_arg);
-    } else if !current_args.contains("--proxy-bypass-list") {
         std::env::set_var(
             "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-            format!("{} {}", current_args, bypass_arg),
+            format!("--proxy-bypass-list={}", REQUIRED_HOSTS.join(";")),
+        );
+        return;
+    }
+    if let Some(pos) = current_args.find("--proxy-bypass-list=") {
+        let prefix_end = pos + "--proxy-bypass-list=".len();
+        let rest = &current_args[prefix_end..];
+        let val_end = rest.find(char::is_whitespace).map(|i| prefix_end + i).unwrap_or(current_args.len());
+        let existing = &current_args[prefix_end..val_end];
+        let mut merged: Vec<String> = existing
+            .split(';')
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect();
+        for host in REQUIRED_HOSTS {
+            if !merged.iter().any(|h| h.eq_ignore_ascii_case(host)) {
+                merged.push((*host).to_string());
+            }
+        }
+        let updated = format!(
+            "{}--proxy-bypass-list={}{}",
+            &current_args[..pos],
+            merged.join(";"),
+            &current_args[val_end..]
+        );
+        std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", updated);
+    } else {
+        std::env::set_var(
+            "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+            format!("{} --proxy-bypass-list={}", current_args, REQUIRED_HOSTS.join(";")),
         );
     }
 }
